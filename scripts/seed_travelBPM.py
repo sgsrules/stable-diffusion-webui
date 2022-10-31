@@ -69,6 +69,7 @@ def maintain_colors(prev_img, color_match_sample, mode):
 color_match_sample = None
 transform_contrast = 1
 symmetrical = False
+prev_latent_img = None
 def sgssampler(self, conditioning, unconditional_conditioning, seeds, subseeds, subseed_strength):
     self.sampler = sd_samplers.create_sampler_with_index(sd_samplers.samplers, self.sampler_index, self.sd_model)
     global global_seed
@@ -84,6 +85,8 @@ def sgssampler(self, conditioning, unconditional_conditioning, seeds, subseeds, 
     global transform_ypos
     global transform_contrast
     global sd_model
+    global animate_latent_trans
+    global prev_latent_img
     symmetrical = False
     sd_model = self.sd_model
     if not self.enable_hr and prev_image != None:
@@ -91,16 +94,15 @@ def sgssampler(self, conditioning, unconditional_conditioning, seeds, subseeds, 
         samples = self.sampler.sample(self, x, conditioning, unconditional_conditioning)
         return samples
     if prev_image != None:
-
         init_latent = image_to_latent(prev_image)
         translated_img = translate(sample_to_cv2(init_latent), self.width // processing.opt_f, self.height // processing.opt_f, 0, transform_zoom, transform_xpos, transform_ypos)
         #translated_img = cv2.flip(translated_img, 0)
         #translated_img = translate(sample_to_cv2(prev_image), self.width // processing.opt_f, self.height // processing.opt_f, 0, transform_zoom, transform_xpos, transform_ypos)
+        translated_img = translated_img * transform_contrast + prev_latent_img * (1.0 - transform_contrast)
         if color_match_sample is None:
-            color_match_sample = translated_img.copy()
+            dummything = translated_img
         else:
-            contrast_img = translated_img * transform_contrast
-            translated_img = maintain_colors(contrast_img, color_match_sample, 'Match Frame 0 RGB')
+            translated_img = maintain_colors(translated_img, color_match_sample, 'Match Frame 0 RGB')
         translated_sample = cv2_to_sample(translated_img)
         noise_sample = add_noise(translated_sample,noise_amount)
         init_latent = noise_sample.to(devices.device)
@@ -119,10 +121,25 @@ def sgssampler(self, conditioning, unconditional_conditioning, seeds, subseeds, 
             init_latent = translated_img.to(devices.device)
         if init_scale != 1 or init_xoffset != 0 or init_yoffset != 0:
             init_width = self.width // processing.opt_f
+
             init_height = self.height // processing.opt_f
             translated_img = translate(sample_to_cv2(init_latent), init_width,init_height , 0, init_scale, init_width*init_xoffset, init_height*init_yoffset)
+
             translated_sample = cv2_to_sample(translated_img);
             init_latent = translated_sample.to(devices.device)
+
+    if animate_latent_trans and prev_image == None:
+        init_width = self.width // processing.opt_f
+        init_height = self.height // processing.opt_f
+        translated_img = translate(sample_to_cv2(init_latent), init_width, init_height, 0, transform_zoom, transform_xpos, transform_ypos)
+        if color_match_sample is None:
+            color_match_sample = translated_img.copy()
+        else:
+            translated_img = maintain_colors(translated_img, color_match_sample, 'Match Frame 0 RGB')
+        translated_sample = cv2_to_sample(translated_img)
+        prev_latent_img = translated_img
+        noise_sample = add_noise(translated_sample, noise_amount)
+        init_latent = noise_sample.to(devices.device)
 
     shared.state.nextjob()
     self.sampler = sd_samplers.create_sampler_with_index(sd_samplers.samplers, self.sampler_index, self.sd_model)
@@ -226,6 +243,7 @@ class Script(scripts.Script):
             seedAmount = gr.Number(label='Number of seeds', value=1)
         with gradio.Row():
             frames = gr.Number(label='Frames', value=256)
+            blendframes = gr.Number(label='Blend Frames', value=0)
             preview = gr.Checkbox(label='Preview', value=False)
         with gradio.Row():
             speed = gr.Number(label='Speed', value=10)
@@ -237,18 +255,21 @@ class Script(scripts.Script):
             target_prompt = gr.Textbox(label="Snare effect", placeholder=None)
             snare_effect_max = gr.Number(label='Snare effect max', value=1.25)
         with gradio.Row():
-            zoom = gr.Number(label='Zoom', value=1.0)
-            transx = gr.Number(label='Translate X', value=0.0)
-            transy = gr.Number(label='Translate Y', value=0.0)
-            noiseamt = gr.Number(label='Noise', value=0.0)
-            animdenoise = gr.Number(label='Denoise strength', value=0.8)
-            contrast =gr.Number(label='Contrast', value=1.0)
-        with gradio.Row():
             scale = gr.Number(label='Scale', value=1.0)
             xoffset = gr.Number(label='X Offset', value=0.0)
             yoffset = gr.Number(label='Y Offset', value=0.0)
+        with gradio.Row():
+            animate_trans = gr.Checkbox(label='Animate Trans', value=False)
+            zoom = gr.Number(label='Zoom', value=1.0)
+            transx = gr.Number(label='Translate X', value=0.0)
+            transy = gr.Number(label='Translate Y', value=0.0)
+        with gradio.Row():
+            feedback_steps = gr.Number(label='Interval', value=1.0)
+            noiseamt = gr.Number(label='Noise', value=0.0)
+            animdenoise = gr.Number(label='Denoise strength', value=0.8)
+            contrast =gr.Number(label='Contrast', value=1.0)
 
-        return [userand, seedAmount, dest_seed, frames, speed, kick, snare, hihat, barHit, preview,target_prompt,snare_effect_max,scale,xoffset,yoffset,zoom,transx,transy,noiseamt,animdenoise,contrast,xoffsets,output_path]
+        return [userand, seedAmount, dest_seed, frames,blendframes, speed, kick, snare, hihat, barHit, preview,target_prompt,snare_effect_max,scale,xoffset,yoffset,zoom,transx,transy,noiseamt,animdenoise,contrast,xoffsets,output_path,animate_trans,feedback_steps]
 
     def get_next_sequence_number(path):
         from pathlib import Path
@@ -274,8 +295,8 @@ class Script(scripts.Script):
                 for index, weight in weight_indexes
             ]
         )
-
-    def run(self, p, userand, seed_count, dest_seed, frames, speed, kick, snare, hihat, barHit, preview, target_prompt, snare_effect_max, scale, xoffset, yoffset,zoom,transx,transy,noiseamt,animdenoise,contrast,xoffsets,output_path):
+    animate_latent_trans = False
+    def run(self, p, userand, seed_count, dest_seed, frames,blendframes, speed, kick, snare, hihat, barHit, preview, target_prompt, snare_effect_max, scale, xoffset, yoffset,zoom,transx,transy,noiseamt,animdenoise,contrast,xoffsets,output_path,animate_trans,feedback_steps):
 
         real_creator = processing.create_random_tensors
         real_sampler = processing.StableDiffusionProcessingTxt2Img.sample
@@ -294,6 +315,9 @@ class Script(scripts.Script):
             global init_latent
             global color_match_sample
             global global_seeds
+            global animate_latent_trans
+            global prev_latent_img
+            animate_latent_trans = animate_trans
 
             transform_contrast = contrast
             transform_zoom = zoom
@@ -376,9 +400,11 @@ class Script(scripts.Script):
                 first_file = None
                 p.do_not_save_samples = False
                 initial_info = None
+                prev_latent_img = None
                 images = []
                 travel_number = Script.get_next_sequence_number(main_travel_path)
                 travel_path = os.path.join(main_travel_path, f"{travel_number:05}")
+                feedback_step = 0
                 if frames > 1:
                     p.outpath_samples = travel_path
                 for step in range(int(frames)):
@@ -457,13 +483,42 @@ class Script(scripts.Script):
                         #    p.do_not_save_samples = True
                         #else:
                         #    p.do_not_save_samples = False
-                        proc = process_images(p)
-                        if initial_info is None:
-                            initial_info = proc.info
-                        images += proc.images
-                        processedFrame = True
-                        #prev_image = proc.images[0]
-                        #p.denoising_strength = animdenoise
+                        if blendframes > 0:
+                            p.do_not_save_samples = True
+                            blendimages = []
+                            finalimage = None
+                            for blendstep in range(int(blendframes)):
+                                p.subseed_strength+= stepAmount/(blendframes+1)
+                                proc = process_images(p)
+                                if initial_info is None:
+                                    initial_info = proc.info
+                                cv2_current_image = np.array(proc.images[0])
+                                cv2_current_image = cv2_current_image[:, :, ::-1].copy()
+                                if finalimage is None:
+                                    finalimage = cv2_current_image /(blendframes+1)
+                                else:
+                                    finalimage = finalimage+ cv2_current_image /(blendframes+1)
+                                processedFrame = True
+                            s2 = f'{step:05d}'
+                            filename = s2 +".png"
+                            tpath = os.path.join(travel_path,filename)
+                            print(f"Writing to {tpath}")
+                            cv2.imwrite( tpath,finalimage)
+                        else:
+                            proc = process_images(p)
+                            if initial_info is None:
+                                initial_info = proc.info
+                            images += proc.images
+                            processedFrame = True
+                        if animate_trans:
+                            if feedback_step >= feedback_steps:
+                                feedback_step = 0
+                                prev_image = proc.images[0]
+                                p.denoising_strength = animdenoise
+                            else:
+                                feedback_step += 1
+                                p.denoising_strength = origdenoise
+                                prev_image = None
                         """
                         if first_file == None and frames > 8:
                             first_file = os.listdir(travel_path)[0]
