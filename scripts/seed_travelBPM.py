@@ -404,6 +404,7 @@ class Script(scripts.Script):
                 images = []
                 travel_number = Script.get_next_sequence_number(main_travel_path)
                 travel_path = os.path.join(main_travel_path, f"{travel_number:05}")
+                os.makedirs(travel_path, exist_ok=True)
                 feedback_step = 0
                 if frames > 1:
                     p.outpath_samples = travel_path
@@ -487,22 +488,24 @@ class Script(scripts.Script):
                             p.do_not_save_samples = True
                             blendimages = []
                             finalimage = None
+                            subadd = float(stepAmount)/float(blendframes+1.0)
                             for blendstep in range(int(blendframes)):
-                                p.subseed_strength+= stepAmount/(blendframes+1)
+                                p.subseed_strength+= subadd * blendstep
+                                print(f"blendAmount { p.subseed_strength} step {step}")
                                 proc = process_images(p)
                                 if initial_info is None:
                                     initial_info = proc.info
                                 cv2_current_image = np.array(proc.images[0])
                                 cv2_current_image = cv2_current_image[:, :, ::-1].copy()
                                 if finalimage is None:
-                                    finalimage = cv2_current_image /(blendframes+1)
+                                    finalimage = cv2_current_image /float(blendframes)
                                 else:
-                                    finalimage = finalimage+ cv2_current_image /(blendframes+1)
+                                    finalimage = finalimage+ cv2_current_image /float(blendframes)
                                 processedFrame = True
                             s2 = f'{step:05d}'
                             filename = s2 +".png"
                             tpath = os.path.join(travel_path,filename)
-                            print(f"Writing to {tpath}")
+
                             cv2.imwrite( tpath,finalimage)
                         else:
                             proc = process_images(p)
