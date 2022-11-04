@@ -73,7 +73,24 @@ symmetrical = False
 prev_latent_cv2_img = None
 current_resample_interval = 0
 prev_resample_cv2_img = None
-def sgssampler(self, conditioning, unconditional_conditioning, seeds, subseeds, subseed_strength):
+
+def pil_to_cv2(pil_img):
+    cv2_img = np.array(pil_img)
+    cv2_img = cv2.cvtColor(cv2_img, cv2.COLOR_RGB2BGR)
+    return cv2_img
+
+def cv2_to_pil(cv2_img):
+    cv2_img = cv2.cvtColor(cv2_img, cv2.COLOR_BGR2RGB)
+    pil_img = Image.fromarray(cv2_img)
+    return pil_img
+
+sd_model = None
+init_latents = []
+noise_latents = []
+original_noise = None
+original_latent = None
+loop_blend = 0.0
+def sgssampler(self, conditioning, unconditional_conditioning, seeds, subseeds, subseed_strength, prompts):
     self.sampler = sd_samplers.create_sampler_with_index(sd_samplers.samplers, self.sampler_index, self.sd_model)
     global global_seed
     global init_latent
@@ -93,6 +110,11 @@ def sgssampler(self, conditioning, unconditional_conditioning, seeds, subseeds, 
     global prev_resample_cv2_img
     global resample_interval
     global current_resample_interval
+    global init_latents
+    global noise_latents
+    global original_noise
+    global original_latent
+    global loop_blend
     symmetrical = False
     sd_model = self.sd_model
     if not self.enable_hr and prev_image != None:
@@ -119,7 +141,31 @@ def sgssampler(self, conditioning, unconditional_conditioning, seeds, subseeds, 
         x = processing.create_random_tensors([processing.opt_C, self.firstphase_height // processing.opt_f, self.firstphase_width // processing.opt_f], seeds=[global_seed], subseeds=subseeds, subseed_strength=0, seed_resize_from_h=self.seed_resize_from_h, seed_resize_from_w=self.seed_resize_from_w, p=self)
         init_latent = self.sampler.sample(self, x, conditioning, unconditional_conditioning)
         init_latent = init_latent[:, :, self.truncate_y // 2:init_latent.shape[2] - self.truncate_y // 2, self.truncate_x // 2:init_latent.shape[3] - self.truncate_x // 2]
-        init_latent = torch.nn.functional.interpolate(init_latent, size=(self.height // processing.opt_f, self.width // processing.opt_f), mode="bilinear")
+
+        hilatent = True
+        if hilatent:
+            init_latent = torch.nn.functional.interpolate(init_latent, size=(self.height // processing.opt_f, self.width // processing.opt_f), mode="bilinear")
+        else:
+            init_image = processing.decode_first_stage(sd_model,init_latent)
+            lowres_samples = torch.clamp((init_image + 1.0) / 2.0, min=0.0, max=1.0)
+
+            batch_images = []
+            for i, x_sample in enumerate(lowres_samples):
+                x_sample = 255. * np.moveaxis(x_sample.cpu().numpy(), 0, 2)
+                x_sample = x_sample.astype(np.uint8)
+                image = Image.fromarray(x_sample)
+                image = images.resize_image(0, image, self.width, self.height)
+                image = np.array(image).astype(np.float32) / 255.0
+                image = np.moveaxis(image, 2, 0)
+                batch_images.append(image)
+
+            decoded_samples = torch.from_numpy(np.array(batch_images))
+            decoded_samples = decoded_samples.to(shared.device)
+            decoded_samples = 2. * decoded_samples - 1.
+
+            samples = self.sd_model.get_first_stage_encoding(self.sd_model.encode_first_stage(decoded_samples))
+            init_latent = samples[0]
+
         prev_latent_cv2_img = sample_to_cv2(init_latent)
         if symmetrical:
             flip_img = cv2.flip(prev_latent_cv2_img, 1)
@@ -131,7 +177,7 @@ def sgssampler(self, conditioning, unconditional_conditioning, seeds, subseeds, 
             translated_sample = cv2_to_sample(prev_latent_cv2_img);
             init_latent = translated_sample.to(devices.device)
         color_match_sample = prev_latent_cv2_img.copy()
-
+    blend_latent = False
     if animate_latent_trans:
         blended_img = prev_latent_cv2_img
         if prev_latent_cv2_img is not None:
@@ -143,7 +189,18 @@ def sgssampler(self, conditioning, unconditional_conditioning, seeds, subseeds, 
                 blended_img = cv2.addWeighted(prev_resample_cv2_img, blend_amount, prev_latent_cv2_img, (1.0 - blend_amount), 0)
         blended_img = maintain_colors(blended_img, color_match_sample, 'Match Frame 0 RGB')
         blended_img = blended_img * transform_contrast
+        if blend_latent:
+            init_latents.append(blended_img)
+            if len(init_latents)>4:
+                del init_latents[0]
+
         blended_sample = cv2_to_sample(blended_img)
+        noise_sample = add_noise(blended_sample, noise_amount)
+        init_latent = noise_sample.to(devices.device)
+
+    if blend_latent and len(init_latents)>3:
+        final_latent = init_latents[3]*.1+init_latents[2]*.2 + init_latents[1]*.3+ init_latents[0]*.4
+        blended_sample = cv2_to_sample(final_latent)
         noise_sample = add_noise(blended_sample, noise_amount)
         init_latent = noise_sample.to(devices.device)
 
@@ -152,14 +209,27 @@ def sgssampler(self, conditioning, unconditional_conditioning, seeds, subseeds, 
 
     noise = processing.create_random_tensors(init_latent.shape[1:], seeds=seeds, subseeds=subseeds, subseed_strength=subseed_strength, seed_resize_from_h=self.seed_resize_from_h, seed_resize_from_w=self.seed_resize_from_w, p=self)
 
+    if blend_latent:
+        #ns = sample_to_cv2(noise)
+        noise_latents.append(noise)
+        if len(noise_latents)>5:
+            del noise_latents[0]
+        if len(noise_latents)>4:
+            final_noise = noise_latents[4]*.1+noise_latents[3]*.25+noise_latents[2]*.3 + noise_latents[1]*.25+ noise_latents[0]*.1
+            noise = final_noise
     # GC now before running the next img2img to prevent running out of memory
     devices.torch_gc()
+
+    if original_noise is None:
+        original_noise = noise
+    if original_latent is None:
+        original_latent = init_latent
 
     samples = self.sampler.sample_img2img(self, init_latent, noise, conditioning, unconditional_conditioning, steps=self.steps)
     #prev_image = self.sd_model.decode_first_stage(samples)
     return samples
 
-sd_model = None
+
 def image_to_latent(prev_image):
     global sd_model
     image = np.array(prev_image).astype(np.float16) / 255.0
@@ -171,16 +241,49 @@ def image_to_latent(prev_image):
     sample = sd_model.get_first_stage_encoding(encoded)
     return sample
 
+
 def latent_to_image(sample):
     global sd_model
-    x_samples_ddim = sd_model.decode_first_stage(sample)
+    decoded_samples =  processing.decode_first_stage(sd_model,sample)
+    lowres_samples = torch.clamp((decoded_samples + 1.0) / 2.0, min=0.0, max=1.0)
+    batch_images = []
+    for i, x_sample in enumerate(lowres_samples):
+        x_sample = 255. * np.moveaxis(x_sample.cpu().numpy(), 0, 2)
+        x_sample = x_sample.astype(np.uint8)
+        image = Image.fromarray(x_sample)
+        #image = images.resize_image(0, image, self.width, self.height)
+        #image = np.array(image).astype(np.float32) / 255.0
+        #image = np.moveaxis(image, 2, 0)
+        batch_images.append(image)
+    """
+    decoded_samples = torch.from_numpy(np.array(batch_images))
+    decoded_samples = decoded_samples.to(shared.device)
+    decoded_samples = 2. * decoded_samples - 1.
+
+    samples = self.sd_model.get_first_stage_encoding(self.sd_model.encode_first_stage(decoded_samples))
+    
     x_samples_ddim = torch.clamp((x_samples_ddim + 1.0) / 2.0, min=0.0, max=1.0)
     x_samples_ddim = x_samples_ddim.cpu().permute(0, 2, 3, 1).numpy()
     x_sample = torch.from_numpy(x_samples_ddim).permute(0, 3, 1, 2)
     x_sample = 255. * rearrange(x_sample.cpu().numpy(), 'c h w -> h w c')
     img = Image.fromarray(x_sample.astype(np.uint8))
-    return img
+    """
+    return batch_images[0]
 
+def view_sample_step(self, latents, path_name_modifier=''):
+    if self.save_sample_per_step or self.show_sample_per_step:
+        samples = self.model.decode_first_stage(latents)
+        if self.save_sample_per_step:
+            fname = f'{path_name_modifier}_{self.step_index:05}.png'
+            for i, sample in enumerate(samples):
+                sample = sample.double().cpu().add(1).div(2).clamp(0, 1)
+                sample = torch.tensor(np.array(sample))
+                grid = make_grid(sample, 4).cpu()
+                TF.to_pil_image(grid).save(os.path.join(self.paths_to_image_steps[i], fname))
+        if self.show_sample_per_step:
+            print(path_name_modifier)
+            self.display_images(samples)
+    return
 
 def cv2_to_sample(sample: np.ndarray) -> torch.Tensor:
     sample = ((sample.astype(float) / 255.0) * 2) - 1
@@ -276,16 +379,17 @@ class Script(scripts.Script):
             yoffset = gr.Number(label='Y Offset', value=0.0)
         with gradio.Row():
             animate_trans = gr.Checkbox(label='Animate Trans', value=False)
-            zoom = gr.Number(label='Zoom', value=1.0)
+            zoom = gr.Textbox(label='Zoom', value=1.0)
             transx = gr.Textbox(label='Translate X', value=0.0)
-            transy = gr.Number(label='Translate Y', value=0.0)
+            transy = gr.Textbox(label='Translate Y', value=0.0)
         with gradio.Row():
             feedback_steps = gr.Number(label='Interval', value=1.0)
-            noiseamt = gr.Number(label='Noise', value=0.0)
+            noiseamt = gr.Textbox(label='Noise', value=0.0)
             animdenoise = gr.Number(label='Denoise strength', value=0.8)
-            contrast =gr.Number(label='Contrast', value=1.0)
+            tweenframes = gr.Number(label='Tween frames', value=0)
+            contrast =gr.Textbox(label='Contrast', value=1.0)
 
-        return [userand, seedAmount, dest_seed, frames,blendframes, speed, kick, snare, hihat, barHit, preview,target_prompt,snare_effect_max,scale,xoffset,yoffset,zoom,transx,transy,noiseamt,animdenoise,contrast,xoffsets,output_path,animate_trans,feedback_steps]
+        return [userand, seedAmount, dest_seed, frames,blendframes, speed, kick, snare, hihat, barHit, preview,target_prompt,snare_effect_max,scale,xoffset,yoffset,zoom,transx,transy,noiseamt,animdenoise,contrast,xoffsets,output_path,animate_trans,feedback_steps,tweenframes]
 
     def get_next_sequence_number(path):
         from pathlib import Path
@@ -312,7 +416,7 @@ class Script(scripts.Script):
             ]
         )
     animate_latent_trans = False
-    def run(self, p, userand, seed_count, dest_seed, frames,blendframes, speed, kick, snare, hihat, barHit, preview, target_prompt, snare_effect_max, scale, xoffset, yoffset,zoom,transx,transy,noiseamt,animdenoise,contrast,xoffsets,output_path,animate_trans,feedback_steps):
+    def run(self, p, userand, seed_count, dest_seed, frames,blendframes, speed, kick, snare, hihat, barHit, preview, target_prompt, snare_effect_max, scale, xoffset, yoffset,zoom,transx,transy,noiseamt,animdenoise,contrast,xoffsets,output_path,animate_trans,feedback_steps,tweenframes):
 
         real_creator = processing.create_random_tensors
         real_sampler = processing.StableDiffusionProcessingTxt2Img.sample
@@ -334,13 +438,9 @@ class Script(scripts.Script):
             global animate_latent_trans
             global prev_latent_cv2_img
             global resample_interval
+            global loop_blend
             animate_latent_trans = animate_trans
 
-            transform_contrast = contrast
-            transform_zoom = zoom
-
-            transform_ypos = transy
-            noise_amount = noiseamt
             init_scale = scale
             init_xoffset = xoffset
             init_yoffset = yoffset
@@ -419,21 +519,33 @@ class Script(scripts.Script):
                 initial_info = None
                 prev_latent_cv2_img = None
                 prev_resample_cv2_img = None
+                original_latent = None
+                original_noise = None
                 resample_interval = feedback_steps
                 rollback = False
                 images = []
+                cframe = 0
                 travel_number = Script.get_next_sequence_number(main_travel_path)
                 travel_path = os.path.join(main_travel_path, f"{travel_number:05}")
                 os.makedirs(travel_path, exist_ok=True)
                 feedback_step = 0
+                loop_frames = 8
+                loop_blend = 0.0
                 if frames > 1:
                     p.outpath_samples = travel_path
                 for step in range(int(frames)):
+                    if step > frames - loop_frames:
+                        loop_blend = (step - (frames- loop_frames))/loop_frames
+                    print(f"Generating frame {step}/{frames} blend:{loop_blend}")
                     p.prompt = source_prompt
                     currentAmount = 0.0
                     snare_effect_strength = 0
                     t = float(step)/float(frames)
                     transform_xpos = eval(transx)
+                    transform_ypos = eval(transy)
+                    transform_contrast = eval(contrast)
+                    transform_zoom = eval(zoom)
+                    noise_amount = eval(noiseamt)
                     if math.fmod(step, 8) == 0:
                         if step > 0:
                             currentAmount = stepAmount * kick
@@ -517,7 +629,7 @@ class Script(scripts.Script):
                             subadd = float(stepAmount)/float(blendframes+1.0)
                             for blendstep in range(int(blendframes)):
                                 p.subseed_strength+= subadd * blendstep
-                                print(f"blendAmount { p.subseed_strength} step {step}")
+                                print(f"blendAmount subseed { p.subseed_strength} blendstep {step}")
                                 proc = process_images(p)
                                 prev_image = proc.images[0]
                                 if initial_info is None:
@@ -533,6 +645,51 @@ class Script(scripts.Script):
                             filename = s2 +".png"
                             tpath = os.path.join(travel_path,filename)
                             cv2.imwrite( tpath,finalimage)
+                        elif tweenframes >0:
+                            p.do_not_save_samples = True
+                            proc = process_images(p)
+                            cv2_current_image = np.array(proc.images[0])
+                            cv2_current_image = cv2.cvtColor(cv2_current_image, cv2.COLOR_RGB2BGR)
+
+                            dv= float(tweenframes+1)
+
+
+                            smallz = pow(transform_zoom,1.0/(dv*dv))
+                            smallx = transform_xpos/dv
+                            smally = transform_ypos/dv
+
+
+                            if prev_image is not None:
+                                cv2_prev_image = np.array(prev_image)
+                                cv2_prev_image = cv2.cvtColor(cv2_prev_image, cv2.COLOR_RGB2BGR)
+                                for tweenframe in range(int(tweenframes)):
+                                    trans_blend = float(tweenframe)/float(tweenframes)
+                                    print(f"trans {smallz} {smallx} {smally}")
+                                    cv2_prev_image = translate(cv2_prev_image, proc.images[0].width, proc.images[0].height, 0, smallz, smallx, smally)
+                                    wimage = cv2.addWeighted(cv2_current_image,trans_blend,cv2_prev_image,(1.0-trans_blend),0)
+                                    cframe = cframe+1;
+                                    s2 = f'{cframe:05d}'
+                                    filename = s2 +".png"
+                                    tpath = os.path.join(travel_path,filename)
+                                    cv2.imwrite( tpath,wimage)
+                                    print(f"writing {cframe} blend {trans_blend}")
+                                    # = cv2.cvtColor(wimage, cv2.COLOR_BGR2RGB)
+                                    #prev_image = Image.fromarray(prev_image)
+                                cframe = cframe+1;
+                                s2 = f'{cframe:05d}'
+                                filename = s2 +".png"
+                                tpath = os.path.join(travel_path,filename)
+                                print(f"writing {cframe}")
+                                cv2.imwrite( tpath,cv2_current_image)
+                                prev_image = proc.images[0]
+                            else:
+                                s2 = f'{cframe:05d}'
+                                filename = s2 +".png"
+                                tpath = os.path.join(travel_path,filename)
+                                cv2.imwrite( tpath,cv2_current_image)
+                                print(f"writing init {cframe}")
+                                prev_image = proc.images[0]
+
                         elif frameblend and transform_contrast<1 and prev_image is not None:
                             p.do_not_save_samples = True
                             proc = process_images(p)
