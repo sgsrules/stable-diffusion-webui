@@ -711,10 +711,11 @@ class Script(scripts.Script):
                             cv2.imwrite( tpath,finalimage)
                         else:
                             proc = process_images(p)
-                            prev_image = proc.images[0]
+                            if len(proc.images) > 0:
+                                prev_image = proc.images[0]
+                                images += proc.images
                             if initial_info is None:
                                 initial_info = proc.info
-                            images += proc.images
                             processedFrame = True
                         if animate_trans:
                             if feedback_step > feedback_steps-1:
