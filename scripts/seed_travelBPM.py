@@ -439,6 +439,7 @@ class Script(scripts.Script):
             global prev_latent_cv2_img
             global resample_interval
             global loop_blend
+            global current_resample_interval
             animate_latent_trans = animate_trans
 
             init_scale = scale
@@ -522,7 +523,8 @@ class Script(scripts.Script):
                 original_latent = None
                 original_noise = None
                 resample_interval = feedback_steps
-                rollback = False
+                rollback = True
+                current_resample_interval = 0
                 images = []
                 cframe = 0
                 travel_number = Script.get_next_sequence_number(main_travel_path)
@@ -662,11 +664,16 @@ class Script(scripts.Script):
                             if prev_image is not None:
                                 cv2_prev_image = np.array(prev_image)
                                 cv2_prev_image = cv2.cvtColor(cv2_prev_image, cv2.COLOR_RGB2BGR)
+                                cv2_curtrans_images = []
+                                cv2_curtrans_images.append(cv2_current_image)
+                                for tweenframe in range(int(tweenframes)):
+                                    cv2_current_image = translate(cv2_current_image, proc.images[0].width, proc.images[0].height, 0, 1-(smallz-1), -smallx, -smally)
+                                    cv2_curtrans_images.append(cv2_current_image)
                                 for tweenframe in range(int(tweenframes)):
                                     trans_blend = float(tweenframe)/float(tweenframes)
                                     print(f"trans {smallz} {smallx} {smally}")
                                     cv2_prev_image = translate(cv2_prev_image, proc.images[0].width, proc.images[0].height, 0, smallz, smallx, smally)
-                                    wimage = cv2.addWeighted(cv2_current_image,trans_blend,cv2_prev_image,(1.0-trans_blend),0)
+                                    wimage = cv2.addWeighted(cv2_curtrans_images[int(tweenframes-tweenframe)],trans_blend,cv2_prev_image,(1.0-trans_blend),0)
                                     cframe = cframe+1;
                                     s2 = f'{cframe:05d}'
                                     filename = s2 +".png"
@@ -680,7 +687,7 @@ class Script(scripts.Script):
                                 filename = s2 +".png"
                                 tpath = os.path.join(travel_path,filename)
                                 print(f"writing {cframe}")
-                                cv2.imwrite( tpath,cv2_current_image)
+                                #cv2.imwrite( tpath,cv2_current_image)
                                 prev_image = proc.images[0]
                             else:
                                 s2 = f'{cframe:05d}'
@@ -723,7 +730,7 @@ class Script(scripts.Script):
                                 p.denoising_strength = animdenoise
                             else:
                                 feedback_step += 1
-                                p.denoising_strength = origdenoise
+                                #p.denoising_strength = origdenoise
                         """
                         if first_file == None and frames > 8:
                             first_file = os.listdir(travel_path)[0]
