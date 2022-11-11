@@ -2,6 +2,7 @@ import os
 import sys
 
 import gradio
+import torchvision.transforms.functional
 
 import modules.scripts as scripts
 import gradio as gr
@@ -25,6 +26,7 @@ init_scale = 1.0
 init_xoffset = 0.0
 init_yoffset = 0.0
 prev_image = None
+t = 0
 def advanced_creator (shape, seeds, subseeds=None, subseed_strength=0.0, seed_resize_from_h=0, seed_resize_from_w=0, p=None):
     global global_seeds
 
@@ -91,6 +93,7 @@ original_noise = None
 original_latent = None
 loop_blend = 0.0
 prev_image_latent = None
+cropYOffset = 0.0
 def sgssampler(self, conditioning, unconditional_conditioning, seeds, subseeds, subseed_strength, prompts):
     self.sampler = sd_samplers.create_sampler_with_index(sd_samplers.samplers, self.sampler_index, self.sd_model)
     global global_seed
@@ -119,7 +122,7 @@ def sgssampler(self, conditioning, unconditional_conditioning, seeds, subseeds, 
     global loop_blend
     global prev_image_latent
     global image_conditioning
-
+    global cropYOffset
     if shared.state.interrupted:
         return
     symmetrical = False
@@ -131,7 +134,7 @@ def sgssampler(self, conditioning, unconditional_conditioning, seeds, subseeds, 
     blend_amount = 0;
     if resample_interval > 0:
         blend_amount = float(current_resample_interval)/float(resample_interval)
-    print(f"blendAmount { blend_amount} step {current_resample_interval} {resample_frame}")
+
     current_resample_interval+=1;
     init_width = self.width // processing.opt_f
     init_height = self.height // processing.opt_f
@@ -161,8 +164,11 @@ def sgssampler(self, conditioning, unconditional_conditioning, seeds, subseeds, 
     if init_latent == None:
         x = processing.create_random_tensors([processing.opt_C, self.firstphase_height // processing.opt_f, self.firstphase_width // processing.opt_f], seeds=[global_seed], subseeds=subseeds, subseed_strength=subseed_strength, seed_resize_from_h=self.seed_resize_from_h, seed_resize_from_w=self.seed_resize_from_w, p=self)
         init_latent = self.sampler.sample(self, x, conditioning, unconditional_conditioning,image_conditioning=self.txt2img_image_conditioning(x))
-        init_latent = init_latent[:, :, self.truncate_y // 2:init_latent.shape[2] - self.truncate_y // 2, self.truncate_x // 2:init_latent.shape[3] - self.truncate_x // 2]
-
+        #init_latent = init_latent[:, :, self.truncate_y // 2:init_latent.shape[2] - self.truncate_y // 2, self.truncate_x // 2:init_latent.shape[3] - self.truncate_x // 2]
+        fph = self.firstphase_height // processing.opt_f
+        firstphase_height_truncated = self.firstphase_width * self.height / self.width
+        cypos = int((self.firstphase_height - firstphase_height_truncated )* float(cropYOffset))// processing.opt_f
+        init_latent = torchvision.transforms.functional.crop(init_latent,cypos,0,int(firstphase_height_truncated)// processing.opt_f, self.firstphase_width // processing.opt_f)
         hilatent = True
         if hilatent:
             init_latent = torch.nn.functional.interpolate(init_latent, size=(self.height // processing.opt_f, self.width // processing.opt_f), mode="bilinear")
@@ -200,12 +206,19 @@ def sgssampler(self, conditioning, unconditional_conditioning, seeds, subseeds, 
             init_latent = translated_sample.to(devices.device)
         color_match_sample = prev_latent_cv2_img.copy()
     blend_latent = False
-
+    blendLength = 1.0/4.0
+    bstart = 1-blendLength
+    final_latent = None
     if animate_latent_trans:
         blended_img = prev_latent_cv2_img
         if prev_latent_cv2_img is not None:
-            prev_latent_cv2_img = translate(prev_latent_cv2_img, init_width, init_height, 0, transform_zoom, transform_xpos, transform_ypos)
-            blended_img = prev_latent_cv2_img
+            blended_img = translate(prev_latent_cv2_img, init_width, init_height, 0, 1.0+t*transform_zoom, transform_xpos, transform_ypos)
+            if(t>bstart):
+                ba = (t-bstart)/blendLength
+                loop_img = translate(prev_latent_cv2_img, init_width, init_height, 0,t*transform_zoom, transform_xpos, transform_ypos)
+                blended_img = cv2.addWeighted(blended_img, 1-ba, loop_img,ba, 0)
+                print(f"blendAmount { ba} t {t}")
+            #blended_img = prev_latent_cv2_img
         if prev_resample_cv2_img is not None:
             #prev_resample_cv2_img = translate(prev_resample_cv2_img, init_width, init_height, 0, transform_zoom, transform_xpos, transform_ypos)
             if prev_latent_cv2_img is not None and resample_interval > 0:
@@ -225,18 +238,21 @@ def sgssampler(self, conditioning, unconditional_conditioning, seeds, subseeds, 
             blended_sample = prev_image_latent
         if blended_sample is not None:
             noise_sample = add_noise(blended_sample, noise_amount)
-            init_latent = noise_sample.to(devices.device)
+            final_latent = noise_sample.to(devices.device)
+            #init_latent = noise_sample.to(devices.device)
 
     if blend_latent and len(init_latents)>3:
         final_latent = init_latents[3]*.1+init_latents[2]*.2 + init_latents[1]*.3+ init_latents[0]*.4
-        blended_sample = cv2_to_sample(final_latent)
-        noise_sample = add_noise(blended_sample, noise_amount)
-        init_latent = noise_sample.to(devices.device)
+        final_latent = cv2_to_sample(final_latent)
+        noise_sample = add_noise(final_latent, noise_amount)
+        final_latent = noise_sample.to(devices.device)
 
+    if final_latent is None:
+        final_latent = init_latent
     shared.state.nextjob()
     self.sampler = sd_samplers.create_sampler_with_index(sd_samplers.samplers, self.sampler_index, self.sd_model)
 
-    noise = processing.create_random_tensors(init_latent.shape[1:], seeds=seeds, subseeds=subseeds, subseed_strength=subseed_strength, seed_resize_from_h=self.seed_resize_from_h, seed_resize_from_w=self.seed_resize_from_w, p=self)
+    noise = processing.create_random_tensors(final_latent.shape[1:], seeds=seeds, subseeds=subseeds, subseed_strength=subseed_strength, seed_resize_from_h=self.seed_resize_from_h, seed_resize_from_w=self.seed_resize_from_w, p=self)
 
     if blend_latent:
         #ns = sample_to_cv2(noise)
@@ -252,9 +268,9 @@ def sgssampler(self, conditioning, unconditional_conditioning, seeds, subseeds, 
     if original_noise is None:
         original_noise = noise
     if original_latent is None:
-        original_latent = init_latent
+        original_latent = final_latent
 
-    samples = self.sampler.sample_img2img(self, init_latent, noise, conditioning, unconditional_conditioning, steps=self.steps, image_conditioning=image_conditioning )
+    samples = self.sampler.sample_img2img(self, final_latent, noise, conditioning, unconditional_conditioning, steps=self.steps, image_conditioning=image_conditioning )
     #prev_image = self.sd_model.decode_first_stage(samples)
     return samples
 
@@ -404,6 +420,7 @@ class Script(scripts.Script):
             snare_effect_max = gr.Number(label='Snare effect max', value=1.25)
         with gradio.Row():
             scale = gr.Number(label='Scale', value=1.0)
+            cropYOff = gr.Number(label='Crop Y Offset', value=0.0)
             xoffset = gr.Number(label='X Offset', value=0.0)
             yoffset = gr.Number(label='Y Offset', value=0.0)
         with gradio.Row():
@@ -418,7 +435,7 @@ class Script(scripts.Script):
             tweenframes = gr.Number(label='Tween frames', value=0)
             contrast =gr.Textbox(label='Contrast', value=1.0)
 
-        return [userand, seedAmount, dest_seed, frames,blendframes, speed, kick, snare, hihat, barHit, preview,target_prompt,snare_effect_max,scale,xoffset,yoffset,zoom,transx,transy,noiseamt,animdenoise,contrast,xoffsets,output_path,animate_trans,feedback_steps,tweenframes]
+        return [userand, seedAmount, dest_seed, frames,blendframes, speed, kick, snare, hihat, barHit, preview,target_prompt,snare_effect_max,scale,cropYOff,xoffset,yoffset,zoom,transx,transy,noiseamt,animdenoise,contrast,xoffsets,output_path,animate_trans,feedback_steps,tweenframes]
 
     def get_next_sequence_number(path):
         from pathlib import Path
@@ -445,7 +462,7 @@ class Script(scripts.Script):
             ]
         )
     animate_latent_trans = False
-    def run(self, p, userand, seed_count, dest_seed, frames,blendframes, speed, kick, snare, hihat, barHit, preview, target_prompt, snare_effect_max, scale, xoffset, yoffset,zoom,transx,transy,noiseamt,animdenoise,contrast,xoffsets,output_path,animate_trans,feedback_steps,tweenframes):
+    def run(self, p, userand, seed_count, dest_seed, frames,blendframes, speed, kick, snare, hihat, barHit, preview, target_prompt, snare_effect_max, scale,cropYOff, xoffset, yoffset,zoom,transx,transy,noiseamt,animdenoise,contrast,xoffsets,output_path,animate_trans,feedback_steps,tweenframes):
 
         real_creator = processing.create_random_tensors
         real_sampler = processing.StableDiffusionProcessingTxt2Img.sample
@@ -476,6 +493,9 @@ class Script(scripts.Script):
             global original_noise
             global original_latent
             global prev_image_latent
+            global cropYOffset
+            global t
+            cropYOffset = cropYOff
             animate_latent_trans = animate_trans
 
             init_scale = scale
