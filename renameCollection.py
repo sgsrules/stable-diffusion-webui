@@ -7,8 +7,9 @@ path = r'F:\CodeProjects\stable-diffusion-webui\outputs\Flowed\Beat Droids\\'
 dir_list = glob.glob(path+"*.*")
 #dir_list = os.listdir(path)
 filelist = []
-filenames = "Rooth,Zoowk,Skresse,Qeeteth,Gieshroth,Qrecceyeth,Qasaw,Grunew,Reinnuw,Ceshi,Alle,Zoow,Zrook,Gooth,Rheyabei,Reatiyi,Rinebbaw,Rheyia,Ghori,Gishe,Ebben,Zriak,Eisoo,Kebba,Sqirrah,Qaleh,Zesselliek,Sqecosheth,Zhinno,Iecen,Qheeti,Qeaw,Crein,Oli,Scooh,Eirriak,Khuna,Rawa,Ataw,Croot"
+filenames = "Ametrine,Amazonite,Angelite,Apophyllite,Aragonite,Aquamarine,Calcite,Celestite,Amethyst,Cancritine,Epidote,Fluorite,Hematite,Polychronic,Labradorite,Lemurian,Moonstone,Agate,Nuummite,Peridot,Aventurine,Jasper,Quartz,Rhodonite,Ruby,Sapphire,Selenite,Shungite,Alabandite,Sodalite,Turquoise,Carborundum,Ilvaite,Hypersthene,Onyx,Arfvedsonite,Amber,Garnet,Rhodochrosite,Opal"
 filenames = filenames.split(',')
+
 i = 0
 for file in dir_list:
     newpath = path + filenames[i] + ".mp4"
