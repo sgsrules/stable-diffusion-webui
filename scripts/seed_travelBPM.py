@@ -94,6 +94,7 @@ original_latent = None
 loop_blend = 0.0
 prev_image_latent = None
 cropYOffset = 0.0
+cv2_prev_image = None
 def sgssampler(self, conditioning, unconditional_conditioning, seeds, subseeds, subseed_strength, prompts):
     self.sampler = sd_samplers.create_sampler_with_index(sd_samplers.samplers, self.sampler_index, self.sd_model)
     global global_seed
@@ -123,11 +124,13 @@ def sgssampler(self, conditioning, unconditional_conditioning, seeds, subseeds, 
     global prev_image_latent
     global image_conditioning
     global cropYOffset
+    global cv2_prev_image
     if shared.state.interrupted:
         return
     symmetrical = False
     sd_model = self.sd_model
     resample_frame = False
+    final_latent = None
     if current_resample_interval > resample_interval-1:
         resample_frame = True
         current_resample_interval = 0
@@ -138,25 +141,30 @@ def sgssampler(self, conditioning, unconditional_conditioning, seeds, subseeds, 
     current_resample_interval+=1;
     init_width = self.width // processing.opt_f
     init_height = self.height // processing.opt_f
-    cv2_prev_image = None
-    if prev_image is not None and resample_frame:
-        cv2_prev_image = np.array(prev_image)
-        cv2_prev_image = cv2.cvtColor(cv2_prev_image, cv2.COLOR_RGB2BGR)
+    #cv2_prev_image = None
+
+    if cv2_prev_image is not None:
+        #cv2_prev_image = np.array(prev_image)
+        #cv2_prev_image = cv2.cvtColor(cv2_prev_image, cv2.COLOR_RGB2BGR)
         if color_match_img is None:
             color_match_img = cv2_prev_image.copy()
-        cv2_prev_image = translate(cv2_prev_image, prev_image.width, prev_image.height, 0, transform_zoom, transform_xpos, transform_ypos)
+        cv2_new_image = translate(cv2_prev_image, prev_image.width, prev_image.height, 0, transform_zoom, transform_xpos, transform_ypos)
+        #cv2_new_image = translate(cv2_new_image, prev_image.width, prev_image.height, 0, transform_zoom, transform_xpos, transform_ypos)
 
         #kernel = np.array([[0,-1,0], [-1,5,-1], [0,-1,0]])
         #cv2_prev_image = cv2.filter2D(cv2_prev_image, -1, kernel)
 
-        cv2_prev_image = maintain_colors(cv2_prev_image, color_match_img, 'Match Frame 0 LAB')
+        cv2_new_image = maintain_colors(cv2_new_image, color_match_img, 'Match Frame 0 LAB')
         bright_adj = (1.0-transform_contrast)*100.0
-        cv2_prev_image = cv2.convertScaleAbs(cv2_prev_image, alpha=transform_contrast, beta=bright_adj)
+        cv2_new_image = cv2.convertScaleAbs(cv2_new_image, alpha=transform_contrast, beta=bright_adj)
         #blur_img = cv2.GaussianBlur(cv2_prev_image,(5,5),0)
         #cv2_prev_image = cv2.addWeighted(cv2_prev_image, (1.0 + transform_contrast), blur_img, -transform_contrast, 0)
 
-        prev_image = cv2_to_pil(cv2_prev_image)
-        prev_image_latent = image_to_latent(prev_image)
+        #prev_image = cv2_to_pil(cv2_prev_image)
+        prev_image_latent = image_to_latent(cv2_to_pil(cv2_new_image))
+        nss = add_noise(prev_image_latent, noise_amount)
+        final_latent = nss.to(devices.device)
+
         if prev_resample_cv2_img is not None:
             prev_latent_cv2_img = prev_resample_cv2_img
         prev_resample_cv2_img = sample_to_cv2(prev_image_latent)
@@ -208,7 +216,8 @@ def sgssampler(self, conditioning, unconditional_conditioning, seeds, subseeds, 
     blend_latent = False
     blendLength = 1.0/4.0
     bstart = 1-blendLength
-    final_latent = None
+
+    blended_sample = prev_image_latent
     if animate_latent_trans:
         blended_img = prev_latent_cv2_img
         if prev_latent_cv2_img is not None:
@@ -355,7 +364,23 @@ def translate(prev_img_cv2, width,height,angle,zoom,translation_x, translation_y
         prev_img_cv2,
         xform,
         (prev_img_cv2.shape[1], prev_img_cv2.shape[0]),
-        borderMode=cv2.BORDER_WRAP
+        borderMode=cv2.BORDER_REPLICATE
+    )
+
+def translateInv(prev_img_cv2, width,height,angle,zoom,translation_x, translation_y):
+
+    center = (width // 2, height // 2)
+    trans_mat = np.float32([[1, 0, translation_x], [0, 1, translation_y]])
+    rot_mat = cv2.getRotationMatrix2D(center, angle, zoom)
+    trans_mat = np.vstack([trans_mat, [0,0,1]])
+    rot_mat = np.vstack([rot_mat, [0,0,1]])
+    xform = np.matmul(rot_mat, trans_mat)
+    xform = np.linalg.inv(xform)
+    return cv2.warpPerspective(
+        prev_img_cv2,
+        xform,
+        (prev_img_cv2.shape[1], prev_img_cv2.shape[0]),
+        borderMode=cv2.BORDER_REPLICATE
     )
 
 
@@ -390,7 +415,34 @@ def anim_frame_warp_2d(prev_img_cv2, args, anim_args, keys, frame_idx):
         (prev_img_cv2.shape[1], prev_img_cv2.shape[0]),
         borderMode=cv2.BORDER_WRAP if anim_args.border == 'wrap' else cv2.BORDER_REPLICATE
     )
+def lerp(a: float, b: float, t: float) -> float:
+    """Linear interpolate on the scale given by a to b, using t as the point on that scale.
+    Examples
+    --------
+        50 == lerp(0, 100, 0.5)
+        4.2 == lerp(1, 5, 0.8)
+    """
+    return (1 - t) * a + t * b
 
+def inv_lerp(a: float, b: float, v: float) -> float:
+    """Inverse Linar Interpolation, get the fraction between a and b on which v resides.
+    Examples
+    --------
+        0.5 == inv_lerp(0, 100, 50)
+        0.8 == inv_lerp(1, 5, 4.2)
+    """
+    return (v - a) / (b - a)
+
+def remap(i_min: float, i_max: float, o_min: float, o_max: float, v: float) -> float:
+    """Remap values from one linear scale to another, a combination of lerp and inv_lerp.
+    i_min and i_max are the scale on which the original value resides,
+    o_min and o_max are the scale to which it should be mapped.
+    Examples
+    --------
+        45 == remap(0, 100, 40, 50, 50)
+        6.2 == remap(1, 5, 3, 7, 4.2)
+    """
+    return lerp(o_min, o_max, inv_lerp(i_min, i_max, v))
 class Script(scripts.Script):
     def title(self):
         return "Seed travel BPM3"
@@ -454,6 +506,12 @@ class Script(scripts.Script):
                 pass
         return result + 1
 
+    def cos(self,cycles,start,end):
+        s = math.cos(math.pi*2.0*cycles*self.ntime)
+        return remap(1,-1,start,end,s)
+    def sin(self,cycles,amp):
+        s = math.sin(math.pi*2.0*cycles*self.ntime)
+        return s * amp
     def prompt_at_t(self, weight_indexes, prompt_list, t):
         return " AND ".join(
             [
@@ -495,6 +553,7 @@ class Script(scripts.Script):
             global prev_image_latent
             global cropYOffset
             global t
+            global cv2_prev_image
             cropYOffset = cropYOff
             animate_latent_trans = animate_trans
 
@@ -550,7 +609,7 @@ class Script(scripts.Script):
                 total_images /= 32
             print(f"Generating {total_images} images from {len(seeds)} seeds")
             state.job_count = total_images * 0.489453125
-            p.denoising_strength = origdenoise
+
             for i in range(len(seeds)):
                 if shared.state.interrupted:
                     break
@@ -585,6 +644,8 @@ class Script(scripts.Script):
                 resample_interval = feedback_steps
                 rollback = True
                 prev_image_latent = None
+                cv2_prev_image = None
+                p.denoising_strength = origdenoise
                 noise_latents = []
 
                 current_resample_interval = 0
@@ -596,6 +657,7 @@ class Script(scripts.Script):
                 feedback_step = 0
                 loop_frames = 8
                 loop_blend = 0.0
+                first_img = None
                 if frames > 1:
                     p.outpath_samples = travel_path
                 for step in range(int(frames)):
@@ -608,6 +670,7 @@ class Script(scripts.Script):
                     currentAmount = 0.0
                     snare_effect_strength = 0
                     t = float(step)/float(frames)
+                    self.ntime = t
                     transform_xpos = eval(transx)
                     transform_ypos = eval(transy)
                     transform_contrast = eval(contrast)
@@ -699,12 +762,12 @@ class Script(scripts.Script):
                                 prev_image = proc.images[0]
                                 if initial_info is None:
                                     initial_info = proc.info
-                                cv2_current_image = np.array(proc.images[0])
-                                cv2_current_image = cv2_current_image[:, :, ::-1].copy()
+                                cv2_next_image = np.array(proc.images[0])
+                                cv2_next_image = cv2_next_image[:, :, ::-1].copy()
                                 if finalimage is None:
-                                    finalimage = cv2_current_image /float(blendframes)
+                                    finalimage = cv2_next_image /float(blendframes)
                                 else:
-                                    finalimage = finalimage+ cv2_current_image /float(blendframes)
+                                    finalimage = finalimage+ cv2_next_image /float(blendframes)
                                 processedFrame = True
                             s2 = f'{step:05d}'
                             filename = s2 +".png"
@@ -712,53 +775,60 @@ class Script(scripts.Script):
                             cv2.imwrite( tpath,finalimage)
                         elif tweenframes >0:
                             p.do_not_save_samples = True
+                            if step > 0:
+                                p.denoising_strength = eval(animdenoise)
                             proc = process_images(p)
-                            cv2_current_image = np.array(proc.images[0])
-                            cv2_current_image = cv2.cvtColor(cv2_current_image, cv2.COLOR_RGB2BGR)
+                            cv2_next_image = np.array(proc.images[0])
+                            cv2_next_image = cv2.cvtColor(cv2_next_image, cv2.COLOR_RGB2BGR)
+                            if first_img is None:
+                                first_img = cv2_next_image
+                            if step >= frames -1:
+                                cv2_next_image = first_img
 
-                            dv= float(tweenframes+1)
-
-
-                            smallz = pow(transform_zoom,1.0/(dv))
-                            smallx = transform_xpos/dv
-                            smally = transform_ypos/dv
-
-
-                            if prev_image is not None:
-                                cv2_prev_image = np.array(prev_image)
-                                cv2_prev_image = cv2.cvtColor(cv2_prev_image, cv2.COLOR_RGB2BGR)
-                                cv2_curtrans_images = []
-                                cv2_curtrans_images.append(cv2_current_image)
+                            if cv2_prev_image is not None:
+                                next_imgs = []
                                 for tweenframe in range(int(tweenframes)):
-                                    cv2_current_image = translate(cv2_current_image, proc.images[0].width, proc.images[0].height, 0, 1-(smallz-1), -smallx, -smally)
-                                    cv2_curtrans_images.append(cv2_current_image)
+                                    ta = float(tweenframe)/float(tweenframes)
+                                    za = lerp(1,transform_zoom,ta)
+                                    zx = lerp(0,transform_xpos,ta)
+                                    zy = lerp(0,transform_ypos,ta)
+                                    nextimg = translateInv(cv2_next_image, proc.images[0].width, proc.images[0].height, 0, za, zx, zy)
+                                    next_imgs.append(nextimg)
+                                    #tpath = os.path.join(travel_path,f'{step:05d}'+f"-n{tweenframe}" +".png")
+                                    #cv2.imwrite( tpath,nextimg)
                                 for tweenframe in range(int(tweenframes)):
-                                    trans_blend = float(tweenframe)/float(tweenframes)
-                                    print(f"trans {smallz} {smallx} {smally}")
-                                    cv2_prev_image = translate(cv2_prev_image, proc.images[0].width, proc.images[0].height, 0, smallz, smallx, smally)
-                                    wimage = cv2.addWeighted(cv2_curtrans_images[int(tweenframes-tweenframe)],trans_blend,cv2_prev_image,(1.0-trans_blend),0)
-                                    cframe = cframe+1;
+                                    ta = float(tweenframe)/float(tweenframes)
+                                    tan = 1- ta
+                                    preimg = cv2_prev_image
+                                    if tweenframe > 0:
+                                        za = lerp(1,transform_zoom,ta)
+                                        zx = lerp(0,transform_xpos,ta)
+                                        zy = lerp(0,transform_ypos,ta)
+                                        preimg = translate(cv2_prev_image, proc.images[0].width, proc.images[0].height, 0, za, zx, zy)
+                                        #tpath = os.path.join(travel_path,f'{step:05d}'+f"-p{tweenframe}" +".png")
+                                        #cv2.imwrite( tpath,preimg)
+                                        preimg = cv2.addWeighted(next_imgs[int(tweenframes-tweenframe)],ta,preimg,(1.0-ta),0)
                                     s2 = f'{cframe:05d}'
+                                    cframe = cframe+1;
                                     filename = s2 +".png"
                                     tpath = os.path.join(travel_path,filename)
-                                    cv2.imwrite( tpath,wimage)
-                                    print(f"writing {cframe} blend {trans_blend}")
-                                    # = cv2.cvtColor(wimage, cv2.COLOR_BGR2RGB)
-                                    #prev_image = Image.fromarray(prev_image)
-                                cframe = cframe+1;
-                                s2 = f'{cframe:05d}'
-                                filename = s2 +".png"
-                                tpath = os.path.join(travel_path,filename)
-                                print(f"writing {cframe}")
-                                #cv2.imwrite( tpath,cv2_current_image)
+                                    cv2.imwrite( tpath,preimg)
+                                    print(f"writing {cframe} blend {ta}")
                                 prev_image = proc.images[0]
+                                cv2_prev_image = cv2_next_image
                             else:
                                 s2 = f'{cframe:05d}'
                                 filename = s2 +".png"
                                 tpath = os.path.join(travel_path,filename)
-                                cv2.imwrite( tpath,cv2_current_image)
-                                print(f"writing init {cframe}")
                                 prev_image = proc.images[0]
+                                cv2_prev_image = cv2_next_image
+                            if len(proc.images) > 0:
+                                prev_image = proc.images[0]
+                                if len(images) < 10:
+                                    images += proc.images
+                            if initial_info is None:
+                                initial_info = proc.info
+                            processedFrame = True
                         else:
                             proc = process_images(p)
                             if len(proc.images) > 0:
