@@ -7,7 +7,7 @@ path = r'F:\CodeProjects\stable-diffusion-webui\outputs\Flowed\Beat Droids\\'
 dir_list = glob.glob(path+"*.*")
 #dir_list = os.listdir(path)
 filelist = []
-filenames = "Temjir,Ebium,Surtar,Useus,Vostus,Vurasil,Rhumos,Zania,Moorr,Qhiborh,Rumphion,Briasis,Qhisoi,Qrohrena,Xorla,Myhdona,Iotz,Qutraura,Duanke,Thotana,Vetar,Ikies,Koteus,Qhysnir,Bivmis,Iean,Qheohr,Qhidall,Geas,Zasyn,Vetelia,Xearae,Yneas,Dotrena,Nera,Kruasis,Eyja,Ekta,Enera,Xegtix,Wides,Chimes,Fodagi,Qeher,Osemis,Cedbris,Xadur,Ortar,Ixses,Ynia"
+filenames = "Rooth,Zoowk,Skresse,Qeeteth,Gieshroth,Qrecceyeth,Qasaw,Grunew,Reinnuw,Ceshi,Alle,Zoow,Zrook,Gooth,Rheyabei,Reatiyi,Rinebbaw,Rheyia,Ghori,Gishe,Ebben,Zriak,Eisoo,Kebba,Sqirrah,Qaleh,Zesselliek,Sqecosheth,Zhinno,Iecen,Qheeti,Qeaw,Crein,Oli,Scooh,Eirriak,Khuna,Rawa,Ataw,Croot"
 filenames = filenames.split(',')
 i = 0
 for file in dir_list:
