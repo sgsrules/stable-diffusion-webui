@@ -3,14 +3,14 @@ import glob
 import os
 
 # Get the list of all files and directories
-path = r'F:\CodeProjects\stable-diffusion-webui\outputs\Flowed\Beat Droids\\'
+path = r'F:\CodeProjects\stable-diffusion-webui\outputs\Flowed\Cybernetica\\'
 dir_list = glob.glob(path+"*.*")
 #dir_list = os.listdir(path)
 filelist = []
-filenames = "Ametrine,Amazonite,Angelite,Apophyllite,Aragonite,Aquamarine,Calcite,Celestite,Amethyst,Cancritine,Epidote,Fluorite,Hematite,Polychronic,Labradorite,Lemurian,Moonstone,Agate,Nuummite,Peridot,Aventurine,Jasper,Quartz,Rhodonite,Ruby,Sapphire,Selenite,Shungite,Alabandite,Sodalite,Turquoise,Carborundum,Ilvaite,Hypersthene,Onyx,Arfvedsonite,Amber,Garnet,Rhodochrosite,Opal"
+filenames = "Cybel,Fiber,Spanner,Udator,Ofuq,Cyl,Gigabit,Azerty,Ufaz,Adr,Mach,Ratcher,Aro,Eralroid,Experiment,Iczoid,Uval,Bracer,Brobot,Plier,Talus,Scrap,Elix,Egexator,Scrappie,Sark,Andromeda,Avivoid,Sparkle,Greez,Cylinder,Odv,Mechi,Core,Wire,Beta,Uloxator,Ulekoid,Tinker,Buttons,Acmx,Izctron,Hammer,Knave,Rusty,Tera,Golem,Nozzle,Twobit,Spencer,Mecha,Spudnik,Ometron,Ehox,Afkator"
 filenames = filenames.split(',')
 
-i = 0
+i = 28
 for file in dir_list:
     newpath = path + filenames[i] + ".mp4"
     i = i + 1
