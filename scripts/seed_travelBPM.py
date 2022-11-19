@@ -433,6 +433,15 @@ def inv_lerp(a: float, b: float, v: float) -> float:
     """
     return (v - a) / (b - a)
 
+ntime = 0
+def cos(cycles,start,end):
+    global ntime
+    s = math.cos(math.pi*2.0*cycles*ntime)
+    return remap(1,-1,start,end,s)
+def sin(cycles,amp):
+    global ntime
+    s = math.sin(math.pi*2.0*cycles*ntime)
+    return s * amp
 def remap(i_min: float, i_max: float, o_min: float, o_max: float, v: float) -> float:
     """Remap values from one linear scale to another, a combination of lerp and inv_lerp.
     i_min and i_max are the scale on which the original value resides,
@@ -449,6 +458,7 @@ class Script(scripts.Script):
 
     def show(self, is_img2img):
         return True
+
 
     def ui(self, is_img2img):
         output_path = gr.Textbox(label='Output Path', lines=1)
@@ -483,7 +493,7 @@ class Script(scripts.Script):
         with gradio.Row():
             feedback_steps = gr.Number(label='Interval', value=1.0)
             noiseamt = gr.Textbox(label='Noise', value=0.0)
-            animdenoise = gr.Number(label='Denoise strength', value=0.8)
+            animdenoise = gr.Textbox(label='Denoise strength', value=0.8)
             tweenframes = gr.Number(label='Tween frames', value=0)
             contrast =gr.Textbox(label='Contrast', value=1.0)
 
@@ -506,12 +516,6 @@ class Script(scripts.Script):
                 pass
         return result + 1
 
-    def cos(self,cycles,start,end):
-        s = math.cos(math.pi*2.0*cycles*self.ntime)
-        return remap(1,-1,start,end,s)
-    def sin(self,cycles,amp):
-        s = math.sin(math.pi*2.0*cycles*self.ntime)
-        return s * amp
     def prompt_at_t(self, weight_indexes, prompt_list, t):
         return " AND ".join(
             [
@@ -521,6 +525,7 @@ class Script(scripts.Script):
         )
     animate_latent_trans = False
     def run(self, p, userand, seed_count, dest_seed, frames,blendframes, speed, kick, snare, hihat, barHit, preview, target_prompt, snare_effect_max, scale,cropYOff, xoffset, yoffset,zoom,transx,transy,noiseamt,animdenoise,contrast,xoffsets,output_path,animate_trans,feedback_steps,tweenframes):
+
 
         real_creator = processing.create_random_tensors
         real_sampler = processing.StableDiffusionProcessingTxt2Img.sample
@@ -554,6 +559,7 @@ class Script(scripts.Script):
             global cropYOffset
             global t
             global cv2_prev_image
+            global ntime
             cropYOffset = cropYOff
             animate_latent_trans = animate_trans
 
@@ -670,7 +676,7 @@ class Script(scripts.Script):
                     currentAmount = 0.0
                     snare_effect_strength = 0
                     t = float(step)/float(frames)
-                    self.ntime = t
+                    ntime = t
                     transform_xpos = eval(transx)
                     transform_ypos = eval(transy)
                     transform_contrast = eval(contrast)
@@ -777,6 +783,7 @@ class Script(scripts.Script):
                             p.do_not_save_samples = True
                             if step > 0:
                                 p.denoising_strength = eval(animdenoise)
+                                print(f"denoise {p.denoising_strength} t{t}")
                             proc = process_images(p)
                             cv2_next_image = np.array(proc.images[0])
                             cv2_next_image = cv2.cvtColor(cv2_next_image, cv2.COLOR_RGB2BGR)
