@@ -18,6 +18,7 @@ import modules.processing as processing
 from skimage.exposure import match_histograms
 from modules import devices, shared, sd_samplers
 import torch
+
 from PIL import Image
 global_seeds = ''
 global_seed = 0

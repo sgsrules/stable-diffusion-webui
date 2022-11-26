@@ -27,3 +27,7 @@ kornia
 lark
 inflection
 GitPython
+tqdm>=4.35.0
+sk-video>=1.1.10
+moviepy>=1.0.3
+torchvision>=0.7.0
