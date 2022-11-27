@@ -31,3 +31,6 @@ notification.mp3
 .vscode
 /test/stdout.txt
 /test/stderr.txt
+RIFE/ffmpeg.exe
+RIFE/ffplay.exe
+RIFE/ffprobe.exe

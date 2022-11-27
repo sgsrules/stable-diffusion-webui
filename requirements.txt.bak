@@ -27,3 +27,5 @@ kornia
 lark
 inflection
 GitPython
+tqdm>=4.35.0
+torchvision>=0.7.0

@@ -1,0 +1,1 @@
+python inference_img.py --img 000001.png 000002.png --exp=2

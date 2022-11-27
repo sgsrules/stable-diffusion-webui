@@ -18,8 +18,9 @@ import modules.processing as processing
 from skimage.exposure import match_histograms
 from modules import devices, shared, sd_samplers
 import torch
-
 from PIL import Image
+
+from torch.nn import functional as F
 global_seeds = ''
 global_seed = 0
 init_latent = None
@@ -527,6 +528,30 @@ class Script(scripts.Script):
     animate_latent_trans = False
     def run(self, p, userand, seed_count, dest_seed, frames,blendframes, speed, kick, snare, hihat, barHit, preview, target_prompt, snare_effect_max, scale,cropYOff, xoffset, yoffset,zoom,transx,transy,noiseamt,animdenoise,contrast,xoffsets,output_path,animate_trans,feedback_steps,tweenframes):
 
+        #rife start here
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        torch.set_grad_enabled(False)
+        if torch.cuda.is_available():
+            torch.backends.cudnn.enabled = True
+            torch.backends.cudnn.benchmark = True
+
+        img = ['000001.png', '000002.png']
+        exp = 4
+        ratio = 0
+        rthreshold = 0.02
+        rmaxcycles = 8
+        modelDir='RIFE\\train_log'
+
+        from RIFE.train_log.RIFE_HDv3 import Model
+        model = Model()
+        model.load_model(modelDir, -1)
+        print("Loaded v3.x HD model.")
+        if not hasattr(model, 'version'):
+            model.version = 0
+        model.eval()
+        model.device()
+        print(model.version)
+        #rife end
 
         real_creator = processing.create_random_tensors
         real_sampler = processing.StableDiffusionProcessingTxt2Img.sample
@@ -652,6 +677,7 @@ class Script(scripts.Script):
                 rollback = True
                 prev_image_latent = None
                 cv2_prev_image = None
+                tweenImg = None
                 p.denoising_strength = origdenoise
                 noise_latents = []
 
@@ -792,30 +818,48 @@ class Script(scripts.Script):
                                 first_img = cv2_next_image
                             if step >= frames -1:
                                 cv2_next_image = first_img
-
+                            def prepRife(img):
+                                img = (torch.tensor(img.transpose(2, 0, 1)).to(device) / 255.).unsqueeze(0)
+                                n, c, h, w = img.shape
+                                ph = ((h - 1) // 64 + 1) * 64
+                                pw = ((w - 1) // 64 + 1) * 64
+                                padding = (0, pw - w, 0, ph - h)
+                                img = F.pad(img, padding)
+                                return img
                             if cv2_prev_image is not None:
                                 next_imgs = []
+                                if tweenImg is None:
+                                    tweenImg = (torch.tensor(cv2_next_image.transpose(2, 0, 1)).to(device) / 255.).unsqueeze(0)
+                                n, c, h, w = tweenImg.shape
+                                next_img_trans = translateInv(cv2_next_image, proc.images[0].width, proc.images[0].height, 0, transform_zoom, transform_xpos, transform_ypos)
+                                prev_img_trans = translate(cv2_prev_image, proc.images[0].width, proc.images[0].height, 0, transform_zoom, transform_xpos, transform_ypos)
                                 for tweenframe in range(int(tweenframes)):
                                     ta = float(tweenframe)/float(tweenframes)
-                                    za = lerp(1,transform_zoom,ta)
-                                    zx = lerp(0,transform_xpos,ta)
-                                    zy = lerp(0,transform_ypos,ta)
-                                    nextimg = translateInv(cv2_next_image, proc.images[0].width, proc.images[0].height, 0, za, zx, zy)
-                                    next_imgs.append(nextimg)
-                                    #tpath = os.path.join(travel_path,f'{step:05d}'+f"-n{tweenframe}" +".png")
-                                    #cv2.imwrite( tpath,nextimg)
+                                    if(tweenframe > 0):
+                                        za = lerp(1,transform_zoom,ta)
+                                        zx = lerp(0,transform_xpos,ta)
+                                        zy = lerp(0,transform_ypos,ta)
+                                        if cv2_next_image is not None:
+                                            nextimg = model.inference(prepRife(cv2_next_image), prepRife(prev_img_trans),ta)
+                                            nextimg= (nextimg[0] * 255).byte().cpu().numpy().transpose(1, 2, 0)[:h, :w]
+                                            nextimg = translateInv(nextimg, proc.images[0].width, proc.images[0].height, 0, za, zx, zy)
+                                            next_imgs.append(nextimg)
+                                    else:
+                                        next_imgs.append(cv2_next_image)
                                 for tweenframe in range(int(tweenframes)):
                                     ta = float(tweenframe)/float(tweenframes)
-                                    tan = 1- ta
                                     preimg = cv2_prev_image
                                     if tweenframe > 0:
                                         za = lerp(1,transform_zoom,ta)
                                         zx = lerp(0,transform_xpos,ta)
                                         zy = lerp(0,transform_ypos,ta)
-                                        preimg = translate(cv2_prev_image, proc.images[0].width, proc.images[0].height, 0, za, zx, zy)
-                                        #tpath = os.path.join(travel_path,f'{step:05d}'+f"-p{tweenframe}" +".png")
-                                        #cv2.imwrite( tpath,preimg)
-                                        preimg = cv2.addWeighted(next_imgs[int(tweenframes-tweenframe)],ta,preimg,(1.0-ta),0)
+                                        previmg = model.inference(prepRife(cv2_prev_image), prepRife(next_img_trans),ta)
+                                        previmg= (previmg[0] * 255).byte().cpu().numpy().transpose(1, 2, 0)[:h, :w]
+                                        previmg = translate(previmg, proc.images[0].width, proc.images[0].height, 0, za, zx, zy)
+
+                                        #preimg = cv2.addWeighted(next_imgs[int(tweenframes-tweenframe)],ta,previmg,(1.0-ta),0)
+                                        preimg = model.inference(prepRife(previmg), prepRife(next_imgs[int(tweenframes-tweenframe)]),ta)
+                                        preimg= (preimg[0] * 255).byte().cpu().numpy().transpose(1, 2, 0)[:h, :w]
                                     s2 = f'{cframe:05d}'
                                     cframe = cframe+1;
                                     filename = s2 +".png"
