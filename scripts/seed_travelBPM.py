@@ -19,6 +19,10 @@ from skimage.exposure import match_histograms
 from modules import devices, shared, sd_samplers
 import torch
 from PIL import Image
+from deforum.depth import DepthModel
+from scripts.depthmap import MidasDepth
+from modules.paths import models_path
+import deforum.src.py3d_tools as p3d
 
 from torch.nn import functional as F
 global_seeds = ''
@@ -97,8 +101,11 @@ loop_blend = 0.0
 prev_image_latent = None
 cropYOffset = 0.0
 cv2_prev_image = None
+cv2_prev_trans_image = None
+pdepth = None
+
 def sgssampler(self, conditioning, unconditional_conditioning, seeds, subseeds, subseed_strength, prompts):
-    self.sampler = sd_samplers.create_sampler_with_index(sd_samplers.samplers, self.sampler_index, self.sd_model)
+    self.sampler = sd_samplers.create_sampler(self.sampler_name, self.sd_model)
     global global_seed
     global init_latent
     global init_scale
@@ -127,6 +134,7 @@ def sgssampler(self, conditioning, unconditional_conditioning, seeds, subseeds, 
     global image_conditioning
     global cropYOffset
     global cv2_prev_image
+    global pdepth
     if shared.state.interrupted:
         return
     symmetrical = False
@@ -145,12 +153,14 @@ def sgssampler(self, conditioning, unconditional_conditioning, seeds, subseeds, 
     init_height = self.height // processing.opt_f
     #cv2_prev_image = None
 
-    if cv2_prev_image is not None:
+    if cv2_prev_trans_image is not None:
         #cv2_prev_image = np.array(prev_image)
         #cv2_prev_image = cv2.cvtColor(cv2_prev_image, cv2.COLOR_RGB2BGR)
         if color_match_img is None:
             color_match_img = cv2_prev_image.copy()
-        cv2_new_image = translate(cv2_prev_image, prev_image.width, prev_image.height, 0, transform_zoom, transform_xpos, transform_ypos)
+        #cv2_new_image = translate(cv2_prev_image, prev_image.width, prev_image.height, 0, transform_zoom, transform_xpos, transform_ypos)
+        cv2_new_image =  cv2_prev_trans_image
+        #cv2_new_image = transform_image_3d(devices.device,cv2_prev_image,pdepth,0,0,0,transform_xpos, transform_ypos,transform_zoom,200,10000,40)
         #cv2_new_image = translate(cv2_new_image, prev_image.width, prev_image.height, 0, transform_zoom, transform_xpos, transform_ypos)
 
         #kernel = np.array([[0,-1,0], [-1,5,-1], [0,-1,0]])
@@ -261,8 +271,7 @@ def sgssampler(self, conditioning, unconditional_conditioning, seeds, subseeds, 
     if final_latent is None:
         final_latent = init_latent
     shared.state.nextjob()
-    self.sampler = sd_samplers.create_sampler_with_index(sd_samplers.samplers, self.sampler_index, self.sd_model)
-
+    self.sampler = sd_samplers.create_sampler(self.sampler_name, self.sd_model)
     noise = processing.create_random_tensors(final_latent.shape[1:], seeds=seeds, subseeds=subseeds, subseed_strength=subseed_strength, seed_resize_from_h=self.seed_resize_from_h, seed_resize_from_w=self.seed_resize_from_w, p=self)
 
     if blend_latent:
@@ -417,6 +426,62 @@ def anim_frame_warp_2d(prev_img_cv2, args, anim_args, keys, frame_idx):
         (prev_img_cv2.shape[1], prev_img_cv2.shape[0]),
         borderMode=cv2.BORDER_WRAP if anim_args.border == 'wrap' else cv2.BORDER_REPLICATE
     )
+
+
+def transform_image_3d(device, prev_img_cv2, depth_tensor, rotX,rotY,rotZ, transX,transY,transZ,  near,far,fov_deg,invert = False):
+    # adapted and optimized version of transform_image_3d from Disco Diffusion https://github.com/alembics/disco-diffusion
+    w, h = prev_img_cv2.shape[1], prev_img_cv2.shape[0]
+
+    rotate_xyz = [rotX,rotY,rotZ]
+    rot_mat = p3d.euler_angles_to_matrix(torch.tensor(rotate_xyz, device=device), "XYZ").unsqueeze(0)
+    if invert:
+        rot_mat = torch.inverse(rot_mat)
+    TRANSLATION_SCALE = 1.0/200.0 # matches Disco
+    if invert:
+        translate = [transX * TRANSLATION_SCALE,-transY * TRANSLATION_SCALE,transZ * TRANSLATION_SCALE]
+    else:
+        translate = [-transX * TRANSLATION_SCALE,transY * TRANSLATION_SCALE,-transZ * TRANSLATION_SCALE]
+    aspect_ratio = float(w)/float(h)
+
+    trans_mat =torch.tensor([translate])
+
+    persp_cam_old = p3d.FoVPerspectiveCameras(near, far, aspect_ratio, fov=fov_deg, degrees=True, device=device)
+    persp_cam_new = p3d.FoVPerspectiveCameras(near, far, aspect_ratio, fov=fov_deg, degrees=True, R=rot_mat, T=trans_mat, device=device)
+
+    # range of [-1,1] is important to torch grid_sample's padding handling
+    y,x = torch.meshgrid(torch.linspace(-1.,1.,h,dtype=torch.float32,device=device),torch.linspace(-1.,1.,w,dtype=torch.float32,device=device))
+    z = torch.as_tensor(depth_tensor, dtype=torch.float32, device=device)
+    xyz_old_world = torch.stack((x.flatten(), y.flatten(), z.flatten()), dim=1)
+
+    xyz_old_cam_xy = persp_cam_old.get_full_projection_transform().transform_points(xyz_old_world)[:,0:2]
+    xyz_new_cam_xy = persp_cam_new.get_full_projection_transform().transform_points(xyz_old_world)[:,0:2]
+
+    #if invert:
+    #    offset_xy = xyz_old_cam_xy - xyz_new_cam_xy
+
+    offset_xy = xyz_new_cam_xy - xyz_old_cam_xy
+    # affine_grid theta param expects a batch of 2D mats. Each is 2x3 to do rotation+translation.
+    identity_2d_batch = torch.tensor([[1.,0.,0.],[0.,1.,0.]], device=device).unsqueeze(0)
+    # coords_2d will have shape (N,H,W,2).. which is also what grid_sample needs.
+    coords_2d = torch.nn.functional.affine_grid(identity_2d_batch, [1,1,h,w], align_corners=False)
+    offset_coords_2d = coords_2d - torch.reshape(offset_xy, (h,w,2)).unsqueeze(0)
+
+    image_tensor = rearrange(torch.from_numpy(prev_img_cv2.astype(np.float32)), 'h w c -> c h w').to(device)
+    new_image = torch.nn.functional.grid_sample(
+        image_tensor.add(1/512 - 0.0001).unsqueeze(0),
+        offset_coords_2d,
+        mode='bicubic',
+        padding_mode='reflection',
+        align_corners=False
+    )
+
+    # convert back to cv2 style numpy array
+    result = rearrange(
+        new_image.squeeze().clamp(0,255),
+        'c h w -> h w c'
+    ).cpu().numpy().astype(prev_img_cv2.dtype)
+    torch.cuda.empty_cache()
+    return result
 def lerp(a: float, b: float, t: float) -> float:
     """Linear interpolate on the scale given by a to b, using t as the point on that scale.
     Examples
@@ -488,10 +553,21 @@ class Script(scripts.Script):
             xoffset = gr.Number(label='X Offset', value=0.0)
             yoffset = gr.Number(label='Y Offset', value=0.0)
         with gradio.Row():
+            camnear = gr.Textbox(label='near', value=200.0)
+            camfar = gr.Textbox(label='far', value=10000.0)
+            camfov = gr.Textbox(label='fov', value=40.0)
+            zscale = gr.Number(label='Z scale', value=1.0)
+            zoffset = gr.Number(label='Z offset', value=.5)
+        with gradio.Row():
+            rotx = gr.Textbox(label='Rotate X', value=0.0)
+            roty = gr.Textbox(label='Rotate Y', value=0.0)
+            rotz = gr.Textbox(label='Rotate Z', value=30.0)
+        with gradio.Row():
             animate_trans = gr.Checkbox(label='Animate Trans', value=False)
-            zoom = gr.Textbox(label='Zoom', value=1.0)
+            #zoom = gr.Textbox(label='Zoom', value=1.0)
             transx = gr.Textbox(label='Translate X', value=0.0)
             transy = gr.Textbox(label='Translate Y', value=0.0)
+            zoom = gr.Textbox(label='Translate Z', value=30.0)
         with gradio.Row():
             feedback_steps = gr.Number(label='Interval', value=1.0)
             noiseamt = gr.Textbox(label='Noise', value=0.0)
@@ -499,7 +575,7 @@ class Script(scripts.Script):
             tweenframes = gr.Number(label='Tween frames', value=0)
             contrast =gr.Textbox(label='Contrast', value=1.0)
 
-        return [userand, seedAmount, dest_seed, frames,blendframes, speed, kick, snare, hihat, barHit, preview,target_prompt,snare_effect_max,scale,cropYOff,xoffset,yoffset,zoom,transx,transy,noiseamt,animdenoise,contrast,xoffsets,output_path,animate_trans,feedback_steps,tweenframes]
+        return [userand, seedAmount, dest_seed, frames,blendframes, speed, kick, snare, hihat, barHit, preview,target_prompt,snare_effect_max,scale,cropYOff,xoffset,yoffset,camnear,camfar,camfov,rotx,roty,rotz,transx,transy,zoom,noiseamt,animdenoise,contrast,xoffsets,output_path,animate_trans,feedback_steps,tweenframes,zscale,zoffset]
 
     def get_next_sequence_number(path):
         from pathlib import Path
@@ -526,7 +602,8 @@ class Script(scripts.Script):
             ]
         )
     animate_latent_trans = False
-    def run(self, p, userand, seed_count, dest_seed, frames,blendframes, speed, kick, snare, hihat, barHit, preview, target_prompt, snare_effect_max, scale,cropYOff, xoffset, yoffset,zoom,transx,transy,noiseamt,animdenoise,contrast,xoffsets,output_path,animate_trans,feedback_steps,tweenframes):
+
+    def run(self, p, userand, seed_count, dest_seed, frames,blendframes, speed, kick, snare, hihat, barHit, preview, target_prompt, snare_effect_max, scale,cropYOff, xoffset, yoffset,camnear,camfar,camfov,rotx,roty,rotz,transx,transy,zoom,noiseamt,animdenoise,contrast,xoffsets,output_path,animate_trans,feedback_steps,tweenframes,zscale,zoffset):
 
         #rife start here
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -535,11 +612,6 @@ class Script(scripts.Script):
             torch.backends.cudnn.enabled = True
             torch.backends.cudnn.benchmark = True
 
-        img = ['000001.png', '000002.png']
-        exp = 4
-        ratio = 0
-        rthreshold = 0.02
-        rmaxcycles = 8
         modelDir='RIFE\\train_log'
 
         from RIFE.train_log.RIFE_HDv3 import Model
@@ -586,6 +658,11 @@ class Script(scripts.Script):
             global t
             global cv2_prev_image
             global ntime
+            global pdepth
+            global cv2_prev_trans_image
+
+            depth_model = None
+            MidasDepth.InitMidas(MidasDepth,0)
             cropYOffset = cropYOff
             animate_latent_trans = animate_trans
 
@@ -593,8 +670,6 @@ class Script(scripts.Script):
             init_xoffset = xoffset
             init_yoffset = yoffset
             processing.StableDiffusionProcessingTxt2Img.sample = sgssampler
-
-
 
             # Force Batch Count to 1.
             p.n_iter = 1
@@ -678,6 +753,8 @@ class Script(scripts.Script):
                 prev_image_latent = None
                 cv2_prev_image = None
                 tweenImg = None
+                pdepth = None
+                cv2_prev_trans_image = None
                 p.denoising_strength = origdenoise
                 noise_latents = []
 
@@ -704,6 +781,12 @@ class Script(scripts.Script):
                     snare_effect_strength = 0
                     t = float(step)/float(frames)
                     ntime = t
+                    rot_x = eval(rotx)
+                    rot_y = eval(roty)
+                    rot_z = eval(rotz)
+                    near = eval(camnear)
+                    far = eval(camfar)
+                    fov = eval(camfov)
                     transform_xpos = eval(transx)
                     transform_ypos = eval(transy)
                     transform_contrast = eval(contrast)
@@ -807,6 +890,9 @@ class Script(scripts.Script):
                             tpath = os.path.join(travel_path,filename)
                             cv2.imwrite( tpath,finalimage)
                         elif tweenframes >0:
+                            #if depth_model is None:
+                            #    depth_model = DepthModel(device)
+                            #    depth_model.load_midas(r'F:\CodeProjects\stable-diffusion-webui\models\midas')
                             p.do_not_save_samples = True
                             if step > 0:
                                 p.denoising_strength = eval(animdenoise)
@@ -818,6 +904,12 @@ class Script(scripts.Script):
                                 first_img = cv2_next_image
                             if step >= frames -1:
                                 cv2_next_image = first_img
+
+                            #ndepth = depth_model.predict(cv2_next_image,1.0,zscale,zoffset )
+                            #depth_model.save(os.path.join(travel_path, f"ndepth_{step:05}.png"), ndepth)
+
+                            ndepth = MidasDepth.GetDepth(MidasDepth,cv2_next_image,proc.images[0].width, proc.images[0].height,zscale,zoffset)
+                            MidasDepth.save(os.path.join(travel_path, f"ndepth_{step:05}.png"), ndepth)
                             def prepRife(img):
                                 img = (torch.tensor(img.transpose(2, 0, 1)).to(device) / 255.).unsqueeze(0)
                                 n, c, h, w = img.shape
@@ -831,18 +923,41 @@ class Script(scripts.Script):
                                 if tweenImg is None:
                                     tweenImg = (torch.tensor(cv2_next_image.transpose(2, 0, 1)).to(device) / 255.).unsqueeze(0)
                                 n, c, h, w = tweenImg.shape
-                                next_img_trans = translateInv(cv2_next_image, proc.images[0].width, proc.images[0].height, 0, transform_zoom, transform_xpos, transform_ypos)
-                                prev_img_trans = translate(cv2_prev_image, proc.images[0].width, proc.images[0].height, 0, transform_zoom, transform_xpos, transform_ypos)
+
+
+
+
+                                next_img_trans = transform_image_3d(device,cv2_next_image,ndepth,rot_x,rot_y,rot_z,transform_xpos, transform_ypos,transform_zoom,near,far,fov,True)
+                                #ntdepth = depth_model.predict(next_img_trans,1.0 )
+                                #ntdepth = MidasDepth.GetDepth(MidasDepth,next_img_trans,proc.images[0].width, proc.images[0].height)
+                                #next_img_trans = translateInv(cv2_next_image, proc.images[0].width, proc.images[0].height, 0, transform_zoom, transform_xpos, transform_ypos)
+                                #prev_img_trans = translate(cv2_prev_image, proc.images[0].width, proc.images[0].height, 0, transform_zoom, transform_xpos, transform_ypos)
+                                #prev_img_trans = transform_image_3d(device,cv2_prev_image,pdepth,0,0,0,transform_xpos, transform_ypos,transform_zoom,200,10000,40)
+                                #pdepth = depth_model.predict(cv2_prev_image,1.0 ,zscale,zoffset)
+                                pdepth = MidasDepth.GetDepth(MidasDepth,cv2_prev_image,proc.images[0].width, proc.images[0].height,zscale,zoffset)
+                                #MidasDepth.save(os.path.join(travel_path, f"pdepth_{step:05}.png"), pdepth)
+                                cv2_prev_trans_image = transform_image_3d(device,cv2_prev_image,pdepth,rot_x,rot_y,rot_z,transform_xpos, transform_ypos,transform_zoom,near,far,fov)
+                                prev_img_trans = cv2_prev_trans_image
                                 for tweenframe in range(int(tweenframes)):
                                     ta = float(tweenframe)/float(tweenframes)
                                     if(tweenframe > 0):
-                                        za = lerp(1,transform_zoom,ta)
+                                        za = lerp(0,transform_zoom,ta)
                                         zx = lerp(0,transform_xpos,ta)
                                         zy = lerp(0,transform_ypos,ta)
+                                        rx = lerp(0,rot_x,ta)
+                                        ry = lerp(0,rot_y,ta)
+                                        rz = lerp(0,rot_z,ta)
                                         if cv2_next_image is not None:
-                                            nextimg = model.inference(prepRife(cv2_next_image), prepRife(prev_img_trans),ta)
-                                            nextimg= (nextimg[0] * 255).byte().cpu().numpy().transpose(1, 2, 0)[:h, :w]
-                                            nextimg = translateInv(nextimg, proc.images[0].width, proc.images[0].height, 0, za, zx, zy)
+                                            #nextimg = model.inference(prepRife(cv2_next_image), prepRife(prev_img_trans),ta)
+                                            #nextimg= (nextimg[0] * 255).byte().cpu().numpy().transpose(1, 2, 0)[:h, :w]
+                                            #ntdepth = depth_model.predict(nextimg,1.0,zscale,zoffset )
+
+                                            #ddepth = model.inference(prepRife(depth_model.DepthtoCv2(ndepth)), prepRife(depth_model.DepthtoCv2(pdepth)),ta)
+                                            #ddepth= (ddepth[0] * 255).byte().cpu().numpy().transpose(1, 2, 0)[:h, :w]
+
+                                            #nextimg = cv2_next_image
+                                            #nextimg = translateInv(nextimg, proc.images[0].width, proc.images[0].height, 0, za, zx, zy)
+                                            nextimg = transform_image_3d(device,cv2_next_image,ndepth,rx,ry,rz,zx, zy,za,near,far,fov,True)
                                             next_imgs.append(nextimg)
                                     else:
                                         next_imgs.append(cv2_next_image)
@@ -850,14 +965,27 @@ class Script(scripts.Script):
                                     ta = float(tweenframe)/float(tweenframes)
                                     preimg = cv2_prev_image
                                     if tweenframe > 0:
-                                        za = lerp(1,transform_zoom,ta)
+                                        za = lerp(0,transform_zoom,ta)
                                         zx = lerp(0,transform_xpos,ta)
                                         zy = lerp(0,transform_ypos,ta)
-                                        previmg = model.inference(prepRife(cv2_prev_image), prepRife(next_img_trans),ta)
-                                        previmg= (previmg[0] * 255).byte().cpu().numpy().transpose(1, 2, 0)[:h, :w]
-                                        previmg = translate(previmg, proc.images[0].width, proc.images[0].height, 0, za, zx, zy)
 
+                                        rx = lerp(0,rot_x,ta)
+                                        ry = lerp(0,rot_y,ta)
+                                        rz = lerp(0,rot_z,ta)
+
+                                        #previmg = model.inference(prepRife(cv2_prev_image), prepRife(next_img_trans),ta)
+                                        #previmg= (previmg[0] * 255).byte().cpu().numpy().transpose(1, 2, 0)[:h, :w]
+                                        #ptdepth = depth_model.predict(previmg,1.0,zscale,zoffset )
+
+                                        #ddepth = model.inference(prepRife(depth_model.DepthtoCv2(pdepth)),prepRife(depth_model.DepthtoCv2(ntdepth)),ta)
+                                        #ddepth= (ddepth[0] * 255).byte().cpu().numpy().transpose(1, 2, 0)[:h, :w]
+
+                                        #previmg = cv2_prev_image
+                                        #previmg = translate(previmg, proc.images[0].width, proc.images[0].height, 0, za, zx, zy)
+                                        previmg = transform_image_3d(device,cv2_prev_image,pdepth,rx,ry,rz,zx, zy,za,near,far,fov)
                                         #preimg = cv2.addWeighted(next_imgs[int(tweenframes-tweenframe)],ta,previmg,(1.0-ta),0)
+                                        #cv2.imwrite(os.path.join(travel_path, f"p_{cframe:05}.png"), previmg)
+                                        #cv2.imwrite(os.path.join(travel_path, f"n_{cframe:05}.png"), next_imgs[int(tweenframes-tweenframe)])
                                         preimg = model.inference(prepRife(previmg), prepRife(next_imgs[int(tweenframes-tweenframe)]),ta)
                                         preimg= (preimg[0] * 255).byte().cpu().numpy().transpose(1, 2, 0)[:h, :w]
                                     s2 = f'{cframe:05d}'
@@ -868,12 +996,14 @@ class Script(scripts.Script):
                                     print(f"writing {cframe} blend {ta}")
                                 prev_image = proc.images[0]
                                 cv2_prev_image = cv2_next_image
+                                cv2_prev_trans_image = transform_image_3d(device,cv2_prev_image,ndepth,rot_x,rot_y,rot_z,transform_xpos, transform_ypos,transform_zoom,near,far,fov)
                             else:
                                 s2 = f'{cframe:05d}'
                                 filename = s2 +".png"
                                 tpath = os.path.join(travel_path,filename)
                                 prev_image = proc.images[0]
                                 cv2_prev_image = cv2_next_image
+                                cv2_prev_trans_image = transform_image_3d(device,cv2_prev_image,ndepth,rot_x,rot_y,rot_z,transform_xpos, transform_ypos,transform_zoom,near,far,fov)
                             if len(proc.images) > 0:
                                 prev_image = proc.images[0]
                                 if len(images) < 10:
@@ -899,7 +1029,7 @@ class Script(scripts.Script):
                                 #p.denoising_strength = origdenoise
 
             state.job_no = state.job_count
-            processed = Processed(p, images, p.seed, initial_info)
+            processed = proc #Processed(p, images, p.seed, initial_info)
             return processed
         finally:
             processing.StableDiffusionProcessingTxt2Img.sample = real_sampler
